@@ -44,6 +44,16 @@ def _entry(hass: HomeAssistant, umid: str) -> MockConfigEntry:
     return entry
 
 
+@pytest.fixture(autouse=True)
+def no_lan_system_info():
+    """Keep the startup system-info read off the network in every test."""
+    with patch(
+        "custom_components.allo_wt7.client.AlloWT7Client.get_system_info",
+        AsyncMock(side_effect=AlloWT7ConnectionError("no LAN in tests")),
+    ):
+        yield
+
+
 @pytest.fixture
 def mock_fetch_oac():
     with patch(
@@ -61,6 +71,7 @@ async def test_setup_creates_entities(hass: HomeAssistant, mock_fetch_oac) -> No
     assert hass.services.has_service(DOMAIN, "open_door")
     assert len(hass.states.async_entity_ids("button")) == 2
     assert len(hass.states.async_entity_ids("event")) == 1
+    assert len(hass.states.async_entity_ids("binary_sensor")) == 1
 
     assert await hass.config_entries.async_unload(entry.entry_id)
     assert entry.state is ConfigEntryState.NOT_LOADED
@@ -166,3 +177,68 @@ async def test_device_trigger_filters_by_device(
     await hass.async_block_till_done()
     assert len(calls) == 1
     unsub()
+
+
+async def test_system_info_updates_device_registry(
+    hass: HomeAssistant, mock_fetch_oac
+) -> None:
+    from homeassistant.helpers import device_registry as dr
+
+    from custom_components.allo_wt7.client import SystemInfo
+
+    info = SystemInfo("IDS9478AW", "V9.9.9", "aa:bb", "2025-01-01")
+    with patch(
+        "custom_components.allo_wt7.client.AlloWT7Client.get_system_info",
+        AsyncMock(return_value=info),
+    ):
+        entry = _entry(hass, "umid1")
+        await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+
+    device = dr.async_get(hass).async_get_device(identifiers={(DOMAIN, "umid1")})
+    assert device.sw_version == "V9.9.9"
+    assert device.model == "IDS9478AW"
+    assert entry.runtime_data.system_info == info
+
+
+async def test_connectivity_sensor_debounces(hass: HomeAssistant, mock_fetch_oac) -> None:
+    entry = _entry(hass, "umid1")
+    await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    coordinator = entry.runtime_data
+    (entity_id,) = hass.states.async_entity_ids("binary_sensor")
+
+    coordinator._on_lan_result(True)
+    await hass.async_block_till_done()
+    assert hass.states.get(entity_id).state == "on"
+
+    coordinator._on_lan_result(False)
+    coordinator._on_lan_result(False)
+    await hass.async_block_till_done()
+    assert hass.states.get(entity_id).state == "on"  # two misses are tolerated
+
+    coordinator._on_lan_result(False)
+    await hass.async_block_till_done()
+    assert hass.states.get(entity_id).state == "off"
+
+    coordinator._on_lan_result(True)
+    await hass.async_block_till_done()
+    assert hass.states.get(entity_id).state == "on"
+
+
+async def test_diagnostics_redacts_secrets(hass: HomeAssistant, mock_fetch_oac) -> None:
+    from custom_components.allo_wt7.diagnostics import (
+        async_get_config_entry_diagnostics,
+    )
+
+    entry = _entry(hass, "umid1")
+    await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    await entry.runtime_data._ensure_oac()
+
+    diag = await async_get_config_entry_diagnostics(hass, entry)
+    text = repr(diag)
+    for secret in ("secret", "1234", "me@example.com", "o" * 64, "umid1"):
+        assert secret not in text
+    assert diag["oac_cached"] is True
+    assert diag["entry"]["data"]["monitor_ip"] == "10.0.0.2"

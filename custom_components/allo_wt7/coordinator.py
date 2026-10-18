@@ -17,12 +17,16 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from datetime import datetime, timedelta
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.dispatcher import async_dispatcher_send
+from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.storage import Store
 
 from .client import (
@@ -34,6 +38,7 @@ from .client import (
     AlloWT7UnsupportedError,
     AlloWT7WrongPinError,
     DeviceInfo,
+    SystemInfo,
     generate_client_id,
 )
 from .const import (
@@ -58,6 +63,7 @@ from .const import (
     DEFAULT_REQUEST_TIMEOUT,
     DOMAIN,
     EVENT_DOORBELL_RING,
+    SIGNAL_UPDATE,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -109,6 +115,14 @@ DOORBELL_SESSION_REFRESH_S = 30.0
 # and retry the cloud no more often than this.
 OAC_CLOUD_RETRY_S = 600.0
 
+# The monitor's HTTP port is sometimes closed while idle (see client._post_lan),
+# so a single failed round trip is normal; only this many in a row mark it
+# unreachable. A success marks it reachable again at once.
+LAN_FAILURES_BEFORE_UNREACHABLE = 3
+
+# Model / firmware rarely change; re-read them over the LAN this often.
+SYSTEM_INFO_REFRESH = timedelta(hours=12)
+
 
 class AlloWT7Coordinator:
     """Owns the OAC cache, exposes open_door() and doorbell ring detection.
@@ -132,6 +146,14 @@ class AlloWT7Coordinator:
         # Serializes cloud fetches so the doorbell loop and a door press that
         # both find the OAC expired trigger one login, not two.
         self._oac_lock = asyncio.Lock()
+
+        # LAN reachability, fed by the client after every LAN round trip.
+        # None until the first LAN call of this run.
+        self.lan_reachable: bool | None = None
+        self._lan_failures = 0
+        # Read with get.system.info; None until read (or if unsupported).
+        self.system_info: SystemInfo | None = None
+        self._system_info_supported = True
 
         # Doorbell polling state
         self._doorbell_task: asyncio.Task | None = None
@@ -162,6 +184,7 @@ class AlloWT7Coordinator:
                 CONF_MIN_SECONDS_BETWEEN_UNLOCKS,
                 DEFAULT_MIN_SECONDS_BETWEEN_UNLOCKS,
             ),
+            on_lan_result=self._on_lan_result,
         )
 
     def _opt(self, key: str, default: Any) -> Any:
@@ -192,6 +215,89 @@ class AlloWT7Coordinator:
                 name=f"{DOMAIN}_doorbell_{self._entry.entry_id}",
             )
             _LOGGER.debug("Doorbell polling task created")
+
+    @callback
+    def async_start_system_info_refresh(self) -> None:
+        """Read system info now and every SYSTEM_INFO_REFRESH.
+
+        Called after the platforms are set up, so the device already exists in
+        the registry when the first read lands.
+        """
+        self._entry.async_create_background_task(
+            self._hass,
+            self.async_refresh_system_info(),
+            name=f"{DOMAIN}_system_info_{self._entry.entry_id}",
+        )
+        self._entry.async_on_unload(
+            async_track_time_interval(
+                self._hass, self._async_scheduled_system_info, SYSTEM_INFO_REFRESH
+            )
+        )
+
+    @property
+    def has_cached_oac(self) -> bool:
+        return bool(self._oac)
+
+    @property
+    def doorbell_polling_running(self) -> bool:
+        return self._doorbell_task is not None and not self._doorbell_task.done()
+
+    @property
+    def signal_update(self) -> str:
+        """Dispatcher signal sent when reachability or system info change."""
+        return SIGNAL_UPDATE.format(self._entry.entry_id)
+
+    @callback
+    def _on_lan_result(self, ok: bool) -> None:
+        if ok:
+            self._lan_failures = 0
+            reachable = True
+        else:
+            self._lan_failures += 1
+            if self._lan_failures < LAN_FAILURES_BEFORE_UNREACHABLE:
+                return
+            reachable = False
+        if reachable != self.lan_reachable:
+            self.lan_reachable = reachable
+            _LOGGER.info(
+                "Monitor %s on the LAN", "reachable" if reachable else "unreachable"
+            )
+            async_dispatcher_send(self._hass, self.signal_update)
+
+    async def _async_scheduled_system_info(self, _now: datetime) -> None:
+        await self.async_refresh_system_info()
+
+    async def async_refresh_system_info(self) -> None:
+        """Read model/firmware over the LAN and mirror them in the device registry.
+
+        Read-only and best effort: failures are logged, never raised, and a
+        model that rejects the command is not asked again in this run.
+        """
+        if not self._system_info_supported:
+            return
+        try:
+            oac = await self._ensure_oac()
+            info = await self._client.get_system_info(
+                self._data[CONF_MONITOR_IP], oac
+            )
+        except AlloWT7UnsupportedError as err:
+            self._system_info_supported = False
+            _LOGGER.debug("System info not available on this model: %s", err)
+            return
+        except (AlloWT7Error, HomeAssistantError) as err:
+            _LOGGER.debug("Could not read system info: %s", err)
+            return
+        self.system_info = info
+        device = dr.async_get(self._hass).async_get_device(
+            identifiers={(DOMAIN, self._entry.unique_id or self._entry.entry_id)}
+        )
+        if device is not None:
+            dr.async_get(self._hass).async_update_device(
+                device.id,
+                model=info.model or device.model,
+                sw_version=info.version or device.sw_version,
+            )
+        async_dispatcher_send(self._hass, self.signal_update)
 
     async def _save(self) -> None:
         await self._store.async_save(
