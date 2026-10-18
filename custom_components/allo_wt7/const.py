@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 DOMAIN = "allo_wt7"
-PLATFORMS = ["button", "event"]
+PLATFORMS = ["binary_sensor", "button", "event"]
 
 MANUFACTURER = "Intelbras"
 MODEL = "Allo wT7"
@@ -70,6 +70,9 @@ CONF_DOORBELL_POLL_INTERVAL = "doorbell_poll_interval_s"
 DEFAULT_DOORBELL_ENABLED = True
 DEFAULT_DOORBELL_POLL_INTERVAL = 2.0
 EVENT_DOORBELL_RING = f"{DOMAIN}_doorbell_ring"
+
+# Dispatcher signal, formatted with the config entry id.
+SIGNAL_UPDATE = f"{DOMAIN}_update_{{}}"
 
 # --- Services
 SERVICE_OPEN_DOOR = "open_door"

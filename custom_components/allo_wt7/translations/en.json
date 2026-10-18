@@ -41,5 +41,12 @@
         }
       }
     }
+  },
+  "entity": {
+    "binary_sensor": {
+      "lan_connectivity": {
+        "name": "LAN connection"
+      }
+    }
   }
 }

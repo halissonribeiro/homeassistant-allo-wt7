@@ -21,6 +21,7 @@ import uuid
 import xml.etree.ElementTree as ET
 from xml.sax.saxutils import escape as xml_escape
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -94,6 +95,21 @@ class DeviceInfo:
     umid: str
     model: str
     name: str
+
+
+@dataclass
+class SystemInfo:
+    """Monitor-reported identity from ``get.system.info`` (LAN, read-only).
+
+    Field names follow the app's GetSystemInfoResp bean
+    (envelope/body/content/system/info/*); see
+    docs/reverse-engineering/evidencias.md.
+    """
+
+    model: str | None
+    version: str | None
+    mac: str | None
+    release_date: str | None
 
 
 _LAN_HEADERS = {
@@ -191,6 +207,7 @@ class AlloWT7Client:
         monitor_retry_delay_s: float = 10.0,
         max_unlocks_per_hour: int = 12,
         min_seconds_between_unlocks: int = 3,
+        on_lan_result: Callable[[bool], None] | None = None,
     ) -> None:
         self._session = session  # shared HA session, used for all LAN calls
         self.client_id = client_id
@@ -200,6 +217,9 @@ class AlloWT7Client:
         self._min_seconds_between_unlocks = min_seconds_between_unlocks
         self._unlock_history: deque[float] = deque(maxlen=256)
         self._lock = asyncio.Lock()
+        # Told after every LAN round trip whether the monitor answered at the
+        # transport level (any HTTP reply counts, even a protocol error).
+        self._on_lan_result = on_lan_result
 
     # --- Public API -----------------------------------------------------------
 
@@ -254,6 +274,37 @@ class AlloWT7Client:
         if err == LAN_ERROR_WRONG_PIN:
             return False
         raise AlloWT7Error(f"check_pin: unexpected error code {err!r}")
+
+    async def get_system_info(
+        self, monitor_ip: str, oac: str, *, scheme: str = "http"
+    ) -> SystemInfo:
+        """Read model / firmware version / MAC with ``get.system.info``.
+
+        Read-only. Raises AlloWT7UnsupportedError on LAN error -1/-10 and
+        AlloWT7AuthError on 401, like the other LAN commands.
+        """
+        body = _build_lan_envelope(oac, "get.system.info")
+        env = await self._post_lan_envelope(monitor_ip, body, scheme)
+        err = env.findtext(".//error") or "?"
+        if err in (LAN_ERROR_COMMAND_UNKNOWN, LAN_ERROR_NOT_SUPPORTED):
+            raise AlloWT7UnsupportedError(
+                f"device does not support 'get.system.info' (LAN error {err})"
+            )
+        if err == LAN_ERROR_AUTH_INVALID:
+            raise AlloWT7AuthError("OAC expired/invalid (refresh from cloud)")
+        if err != LAN_ERROR_OK:
+            raise AlloWT7Error(f"get.system.info: unexpected error code {err!r}")
+
+        def _field(name: str) -> str | None:
+            value = (env.findtext(f".//system/info/{name}") or "").strip()
+            return value or None
+
+        return SystemInfo(
+            model=_field("model"),
+            version=_field("version"),
+            mac=_field("mac"),
+            release_date=_field("releasedate"),
+        )
 
     async def poll_last_picture(
         self,
@@ -322,7 +373,9 @@ class AlloWT7Client:
             try:
                 _, raw = await self._lan_request(url, session_body)
             except _LAN_TRANSPORT_ERRORS as exc:
+                self._report_lan(False)
                 return None, None, None, f"session request failed: {exc!r}"
+            self._report_lan(True)
             total_bytes += len(raw)
 
             env = _parse_envelope(raw)
@@ -362,7 +415,12 @@ class AlloWT7Client:
             try:
                 _, raw = await self._lan_request(url, msg_body)
             except _LAN_TRANSPORT_ERRORS:
+                if session_id is not None and not total_bytes:
+                    # Reused session and the very first read failed: nothing
+                    # reached us this poll.
+                    self._report_lan(False)
                 break  # use whatever we collected so far
+            self._report_lan(True)
             total_bytes += len(raw)
 
             env = _parse_envelope(raw)
@@ -545,11 +603,19 @@ class AlloWT7Client:
         raise AlloWT7Error(f"unexpected LAN error code {err!r}")
 
     async def _post_lan(self, monitor_ip: str, body: str, scheme: str) -> str:
-        """POST body to /tdkcgi. Returns the <error> field as string.
+        """POST body to /tdkcgi. Returns the <error> field as string."""
+        env = await self._post_lan_envelope(monitor_ip, body, scheme)
+        return env.findtext(".//error") or "?"
+
+    async def _post_lan_envelope(
+        self, monitor_ip: str, body: str, scheme: str
+    ) -> ET.Element:
+        """POST body to /tdkcgi and return the parsed reply envelope.
 
         Tries https first, then ``scheme`` if it is plain http. The monitor's
         HTTP port is closed when idle and reopens on activity; if every scheme
-        fails at the transport level we wait and retry once.
+        fails at the transport level we wait and retry once. An unparseable
+        reply yields an envelope whose <error> is "?".
         """
         # https-first: many wT7 units (e.g. IDS94B1W) are https-only and *filter*
         # port 80 (SYN dropped -> full-timeout hang) rather than refusing it, which
@@ -565,14 +631,15 @@ class AlloWT7Client:
                 except _LAN_TRANSPORT_ERRORS as e:
                     last_exc = e
                     continue
+                self._report_lan(True)
                 if status != 200:
                     _LOGGER.warning("LAN %s HTTP %s", url, status)
                     continue
                 env = _parse_envelope(raw)
                 if env is None:
                     _LOGGER.warning("LAN unparseable: %r", raw[:200])
-                    return "?"
-                return env.findtext(".//error") or "?"
+                    return ET.fromstring("<envelope><error>?</error></envelope>")
+                return env
             if attempt == 0:
                 _LOGGER.info(
                     "monitor possibly idle, waiting %.1fs and retrying",
@@ -580,6 +647,7 @@ class AlloWT7Client:
                 )
                 await asyncio.sleep(self._monitor_retry_delay_s)
 
+        self._report_lan(False)
         raise AlloWT7ConnectionError(
             f"monitor unreachable at {monitor_ip}{LAN_CGI_PATH}: {last_exc!r}"
         )
@@ -605,6 +673,10 @@ class AlloWT7Client:
                 if attempt == 1:
                     raise
         raise AssertionError("unreachable")
+
+    def _report_lan(self, ok: bool) -> None:
+        if self._on_lan_result is not None:
+            self._on_lan_result(ok)
 
     async def _post(
         self,

@@ -151,3 +151,48 @@ async def test_poll_last_picture_picks_newest_and_reuses_session() -> None:
         )
     assert (fn, sess, err) == (None, "42", None)
     assert "get.record.session" not in mock.call_args_list[0].args[1]
+
+
+async def test_get_system_info_parses_fields() -> None:
+    client = _client()
+    info_xml = (
+        "<content><system><info><model>IDS9478AW</model><version>V1.2.3</version>"
+        "<mac>aa:bb:cc:dd:ee:ff</mac><releasedate>2025-01-02</releasedate>"
+        "</info></system></content>"
+    )
+    mock = AsyncMock(return_value=(200, _reply("0", info_xml)))
+    with patch.object(client, "_lan_request", mock):
+        info = await client.get_system_info("10.0.0.2", "oac")
+    assert "<command>get.system.info</command>" in mock.call_args.args[1]
+    assert (info.model, info.version, info.mac, info.release_date) == (
+        "IDS9478AW",
+        "V1.2.3",
+        "aa:bb:cc:dd:ee:ff",
+        "2025-01-02",
+    )
+
+
+async def test_get_system_info_unsupported() -> None:
+    client = _client()
+    with patch.object(client, "_lan_request", AsyncMock(return_value=(200, _reply("-1")))):
+        with pytest.raises(AlloWT7UnsupportedError):
+            await client.get_system_info("10.0.0.2", "oac")
+
+
+async def test_lan_result_callback() -> None:
+    results: list[bool] = []
+    client = AlloWT7Client(
+        AsyncMock(), monitor_retry_delay_s=0, on_lan_result=results.append
+    )
+    with patch.object(client, "_lan_request", AsyncMock(return_value=(200, _reply("0")))):
+        await client.check_pin("10.0.0.2", "oac", "1234")
+    assert results == [True]
+
+    results.clear()
+    with patch.object(
+        client, "_lan_request", AsyncMock(side_effect=asyncio.TimeoutError)
+    ):
+        with pytest.raises(AlloWT7ConnectionError):
+            await client.check_pin("10.0.0.2", "oac", "1234")
+    # One verdict per operation, after all schemes and the retry failed.
+    assert results == [False]

@@ -13,7 +13,7 @@
 
 Open the doors of your **Intelbras Allo wT7** video intercom from Home Assistant — over the local network, without keeping the official Allo Plus app running.
 
-> **Status: 0.4.0.** Door opening and doorbell ring detection are working and validated against a real device (model `IDS9478AW`).  Two-way audio and camera stream are out of scope for now.
+> **Status: 0.5.0.** Door opening and doorbell ring detection are working and validated against a real device (model `IDS9478AW`).  Two-way audio and camera stream are out of scope for now.
 
 ## Features
 
@@ -23,6 +23,8 @@ Open the doors of your **Intelbras Allo wT7** video intercom from Home Assistant
 - 🛠️ **Service action** `allo_wt7.open_door` for automations that need to pass `lock_number` dynamically
 - 🌐 **Local-first**: the cloud is contacted only on startup and every 12 h to refresh credentials; all doorbell polls and door-opens are direct LAN
 - 🔒 **Your password and PIN are stored encrypted by Home Assistant**, never transmitted in plaintext
+- 📶 **LAN connection** diagnostic `binary_sensor`, plus the monitor's model and firmware read over the LAN (`get.system.info`, best effort) into the device page
+- 🩺 **Download diagnostics** with credentials, e-mail, MAC and device IDs redacted
 
 ## Requirements
 
@@ -194,6 +196,7 @@ The cloud is contacted only to fetch the `out-auth-code` (OAC) — a per-device 
 - [x] 0.2.0 — Switch to `button` entities + service action
 - [x] 0.3.0 — Doorbell ring detection via `event` entity
 - [x] 0.4.0 — Pooled LAN connections, offline-tolerant OAC cache, per-device rings (this fork)
+- [x] 0.5.0 — LAN connectivity sensor, firmware info, diagnostics, reverse-engineering notes (this fork)
 - [ ] Camera snapshot
 - [ ] Two-way audio
 - [ ] Push to HACS default repositories
@@ -232,6 +235,20 @@ Open an issue on [GitHub](https://github.com/halissonribeiro/homeassistant-allo-
   declared).
 - **Tests and CI.** `pytest` suite (`pip install -r requirements_test.txt &&
   pytest`) plus hassfest and HACS validation on GitHub Actions.
+
+### 0.5.0
+
+- Static analysis of the Allo Plus 2.4.77.17 app (REA + JADX), with an
+  evidence log, feasibility matrix and plan in
+  [docs/reverse-engineering/](docs/reverse-engineering/README.md) (in
+  Portuguese). Nothing there is hardware-verified yet.
+- `binary_sensor` *LAN connection* (diagnostic): fed by the integration's own
+  LAN calls, no extra traffic; goes off after 3 consecutive failures.
+- Model and firmware from `get.system.info`, refreshed every 12 h; skipped
+  for good if the monitor answers that it does not support it.
+- Diagnostics download with secrets redacted.
+- `tools/probe_readonly.py`: read-only LAN probe to check which app commands
+  your monitor answers (never sends `set.*`).
 
 ## Support the original author
 
