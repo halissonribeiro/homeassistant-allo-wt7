@@ -299,12 +299,31 @@ class AlloWT7Client:
             value = (env.findtext(f".//system/info/{name}") or "").strip()
             return value or None
 
+        model = _field("model")
+        if model is None:
+            # Firmware V401.R001.A310 (IDS9478AW) only reports the model in
+            # get.product.info; get.system.info carries version/MAC only.
+            model = await self._get_product_model(monitor_ip, oac, scheme)
+
         return SystemInfo(
-            model=_field("model"),
+            model=model,
             version=_field("version"),
             mac=_field("mac"),
             release_date=_field("releasedate"),
         )
+
+    async def _get_product_model(
+        self, monitor_ip: str, oac: str, scheme: str
+    ) -> str | None:
+        """Best-effort model lookup via ``get.product.info``; None on any error."""
+        body = _build_lan_envelope(oac, "get.product.info")
+        try:
+            env = await self._post_lan_envelope(monitor_ip, body, scheme)
+        except AlloWT7Error:
+            return None
+        if (env.findtext(".//error") or "?") != LAN_ERROR_OK:
+            return None
+        return (env.findtext(".//info/model") or "").strip() or None
 
     async def poll_last_picture(
         self,
