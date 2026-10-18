@@ -1,12 +1,15 @@
-"""Data update coordinator for the Allo wT7 integration.
+"""Coordinator for the Allo wT7 integration.
 
 This coordinator owns the OAC cache (on top of HA's storage helper) so
 the cloud is hit at most every `oac_cache_ttl_s` seconds (12h default).
+If the cloud is unreachable when the cache expires, the last known OAC keeps
+being used on the LAN, so a cloud/internet outage does not lock you out.
 
 Doorbell detection: a background asyncio task polls ``get.record.session``
 + ``get.record.message`` on the LAN every 2 s (adaptive).  When a new
 picture filename appears (the wT7 saves one JPEG per ring), the coordinator
-fires the ``allo_wt7_doorbell_ring`` event on the HA bus.
+fires the ``allo_wt7_doorbell_ring`` event on the HA bus, tagged with the
+config entry id so multiple monitors do not trigger each other's automations.
 """
 
 from __future__ import annotations
@@ -16,19 +19,20 @@ import logging
 import time
 from typing import Any
 
-import aiohttp
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.storage import Store
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .client import (
     AlloWT7AuthError,
     AlloWT7Client,
+    AlloWT7ConnectionError,
     AlloWT7Error,
+    AlloWT7RateLimitError,
     AlloWT7UnsupportedError,
+    AlloWT7WrongPinError,
     DeviceInfo,
     generate_client_id,
 )
@@ -101,12 +105,19 @@ DOORBELL_WARMUP_MAX_POLLS = 15    # hard cap on warmup reads (flaky-device backs
 # order of magnitude as the post-ring throttle window below.
 DOORBELL_SESSION_REFRESH_S = 30.0
 
+# When the OAC cache expires while the cloud is down, keep using the cached OAC
+# and retry the cloud no more often than this.
+OAC_CLOUD_RETRY_S = 600.0
 
-class AlloWT7Coordinator(DataUpdateCoordinator):
-    """Owns the OAC cache, exposes open_door() and doorbell ring detection."""
+
+class AlloWT7Coordinator:
+    """Owns the OAC cache, exposes open_door() and doorbell ring detection.
+
+    Nothing is refreshed on a schedule (the doorbell loop is its own task), so
+    this is a plain object rather than a DataUpdateCoordinator.
+    """
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
-        super().__init__(hass, _LOGGER, name=f"{DOMAIN}_{entry.entry_id}")
         self._hass = hass
         self._entry = entry
         self._data = entry.data
@@ -115,10 +126,12 @@ class AlloWT7Coordinator(DataUpdateCoordinator):
         self._store: Store = Store(
             hass, STORE_VERSION, f"{DOMAIN}_{entry.entry_id}_oac"
         )
-        self._client_id: str | None = None
         self._oac: str | None = None
         self._oac_expires_at: float = 0.0
         self.device_info: DeviceInfo | None = None
+        # Serializes cloud fetches so the doorbell loop and a door press that
+        # both find the OAC expired trigger one login, not two.
+        self._oac_lock = asyncio.Lock()
 
         # Doorbell polling state
         self._doorbell_task: asyncio.Task | None = None
@@ -136,10 +149,8 @@ class AlloWT7Coordinator(DataUpdateCoordinator):
         self._doorbell_session_id: str | None = None
         self._doorbell_session_opened_at: float = 0.0
 
-        session = async_get_clientsession(hass)
         self._client = AlloWT7Client(
-            session,
-            client_id="",  # filled after storage load
+            async_get_clientsession(hass),
             request_timeout_s=self._opt(CONF_REQUEST_TIMEOUT, DEFAULT_REQUEST_TIMEOUT),
             monitor_retry_delay_s=self._opt(
                 CONF_MONITOR_RETRY_DELAY, DEFAULT_MONITOR_RETRY_DELAY
@@ -159,7 +170,7 @@ class AlloWT7Coordinator(DataUpdateCoordinator):
     async def async_setup(self) -> None:
         """Load persisted OAC + client_id from disk, then start doorbell polling."""
         stored = await self._store.async_load() or {}
-        self._client_id = stored.get("client_id") or generate_client_id()
+        self._client.client_id = stored.get("client_id") or generate_client_id()
         self._oac = stored.get("oac")
         self._oac_expires_at = stored.get("expires_at", 0.0)
         device_info = stored.get("device_info") or {}
@@ -169,7 +180,6 @@ class AlloWT7Coordinator(DataUpdateCoordinator):
                 model=device_info.get("model", ""),
                 name=device_info.get("name", ""),
             )
-        self._client._client_id = self._client_id  # patch in client_id
         await self._save()
 
         if self._opt(CONF_DOORBELL_ENABLED, DEFAULT_DOORBELL_ENABLED):
@@ -186,7 +196,7 @@ class AlloWT7Coordinator(DataUpdateCoordinator):
     async def _save(self) -> None:
         await self._store.async_save(
             {
-                "client_id": self._client_id,
+                "client_id": self._client.client_id,
                 "oac": self._oac,
                 "expires_at": self._oac_expires_at,
                 "device_info": (
@@ -202,35 +212,48 @@ class AlloWT7Coordinator(DataUpdateCoordinator):
         )
 
     async def _ensure_oac(self, *, force_refresh: bool = False) -> str:
+        """Return a usable OAC, fetching from the cloud only when needed.
+
+        When the cache has expired (not on an explicit force_refresh) and the
+        cloud cannot be reached, fall back to the cached OAC: the monitor is
+        the real authority and answers 401 if it no longer accepts it, which
+        is what triggers a forced refresh.
+        """
         if not force_refresh and self._oac and time.time() < self._oac_expires_at:
             return self._oac
-        try:
-            oac, info = await self._client.fetch_oac(
-                self._data[CONF_EMAIL], self._data[CONF_PASSWORD]
-            )
-        except AlloWT7AuthError as err:
-            raise UpdateFailed(f"cloud auth failed: {err}") from err
-        except AlloWT7Error as err:
-            raise UpdateFailed(f"cloud error: {err}") from err
-        self._oac = oac
-        self.device_info = info
-        ttl = self._opt(CONF_OAC_CACHE_TTL, DEFAULT_OAC_CACHE_TTL)
-        self._oac_expires_at = time.time() + ttl
-        await self._save()
-        return oac
-
-    async def _async_update_data(self) -> dict[str, Any]:
-        """Called by DataUpdateCoordinator. We do nothing periodic — only
-        refresh OAC on demand or when explicitly forced.
-        """
-        return {
-            "umid": self.device_info.umid if self.device_info else None,
-            "model": self.device_info.model if self.device_info else None,
-            "name": self.device_info.name if self.device_info else None,
-        }
+        stale_oac = self._oac
+        async with self._oac_lock:
+            # Another caller may have refreshed while we waited for the lock.
+            if self._oac != stale_oac and self._oac:
+                return self._oac
+            try:
+                oac, info = await self._client.fetch_oac(
+                    self._data[CONF_EMAIL], self._data[CONF_PASSWORD]
+                )
+            except AlloWT7ConnectionError as err:
+                if stale_oac and not force_refresh:
+                    _LOGGER.warning(
+                        "Cloud unreachable (%s); reusing cached OAC on the LAN", err
+                    )
+                    # Don't hit the cloud again on every doorbell poll.
+                    self._oac_expires_at = time.time() + OAC_CLOUD_RETRY_S
+                    return stale_oac
+                raise HomeAssistantError(f"Allo wT7 cloud error: {err}") from err
+            except AlloWT7Error as err:
+                raise HomeAssistantError(f"Allo wT7 cloud error: {err}") from err
+            self._oac = oac
+            self.device_info = info
+            ttl = self._opt(CONF_OAC_CACHE_TTL, DEFAULT_OAC_CACHE_TTL)
+            self._oac_expires_at = time.time() + ttl
+            await self._save()
+            return oac
 
     async def async_open_door(self, lock_number: int) -> None:
-        """Open the given door (1 = social, 2 = gate, ...)."""
+        """Open the given door (1 = social, 2 = gate, ...).
+
+        Every client error is translated to HomeAssistantError so the UI shows
+        a readable message instead of a traceback.
+        """
         # Entries created before the optional-PIN feature have no
         # CONF_REQUIRE_PIN key — default True so they keep sending the PIN.
         unlock_pin = (
@@ -248,21 +271,32 @@ class AlloWT7Coordinator(DataUpdateCoordinator):
                     lock_number=lock_number,
                 )
                 return
-            except AlloWT7UnsupportedError as err:
-                # Permanent, model-specific: surface a clean error in the UI
-                # instead of an unhandled traceback, and don't retry.
-                raise HomeAssistantError(
-                    "This wT7 model does not support the door-open command used "
-                    "by the integration and may use a different protocol. See the "
-                    "README ('Unsupported models')."
-                ) from err
             except AlloWT7AuthError as err:
                 if attempt == 0:
                     _LOGGER.warning(
                         "OAC may be expired (%s) — refreshing once", err
                     )
                     continue
-                raise
+                raise HomeAssistantError(
+                    f"Allo wT7 rejected the credential: {err}"
+                ) from err
+            except AlloWT7UnsupportedError as err:
+                # Permanent, model-specific: don't retry.
+                raise HomeAssistantError(
+                    "This wT7 model does not support the door-open command used "
+                    "by the integration and may use a different protocol. See the "
+                    "README ('Unsupported models')."
+                ) from err
+            except AlloWT7WrongPinError as err:
+                raise HomeAssistantError(
+                    "Allo wT7 rejected the unlock PIN; reconfigure the integration"
+                ) from err
+            except AlloWT7RateLimitError as err:
+                raise HomeAssistantError(
+                    f"Allo wT7 unlock rate limit reached: {err}"
+                ) from err
+            except AlloWT7Error as err:
+                raise HomeAssistantError(f"Allo wT7 error: {err}") from err
         # unreachable, but keep type-checkers happy
         raise RuntimeError("open_door retry loop fell through")
 
@@ -297,9 +331,6 @@ class AlloWT7Coordinator(DataUpdateCoordinator):
         throttle_until: float = 0.0
         consecutive_errors: int = 0
 
-        # Reuse the shared HA client session for all LAN polls
-        session = async_get_clientsession(self._hass)
-
         _LOGGER.info(
             "Doorbell polling started (%.1f s normal, %.1f s throttled)",
             normal_interval,
@@ -329,7 +360,6 @@ class AlloWT7Coordinator(DataUpdateCoordinator):
                 reused_session_id = self._doorbell_session_id
                 filename, starttime, new_session_id, err = (
                     await self._client.poll_last_picture(
-                        session,
                         self._data[CONF_MONITOR_IP],
                         oac,
                         session_id=reused_session_id,
@@ -427,7 +457,11 @@ class AlloWT7Coordinator(DataUpdateCoordinator):
                     throttle_until = time.monotonic() + throttle_window
                     self._hass.bus.async_fire(
                         EVENT_DOORBELL_RING,
-                        {"filename": filename, "starttime": starttime},
+                        {
+                            "entry_id": self._entry.entry_id,
+                            "filename": filename,
+                            "starttime": starttime,
+                        },
                     )
                 # else: starttime <= high-water -> truncated/stale/duplicate read.
                 # Ignore it and keep the mark; this is the case that used to
@@ -448,21 +482,3 @@ class AlloWT7Coordinator(DataUpdateCoordinator):
             except Exception:  # noqa: BLE001
                 _LOGGER.exception("Unexpected error in doorbell poll loop")
                 await asyncio.sleep(error_backoff)
-
-    async def async_validate(self) -> None:
-        """Used by config flow: fetch OAC and verify PIN against the device."""
-        # Nothing to validate when the device is configured without a PIN.
-        if not self._data.get(CONF_REQUIRE_PIN, True):
-            await self._ensure_oac(force_refresh=True)
-            return
-        oac = await self._ensure_oac(force_refresh=True)
-        try:
-            ok = await self._client.check_pin(
-                monitor_ip=self._data[CONF_MONITOR_IP],
-                oac=oac,
-                unlock_pin=self._data[CONF_UNLOCK_PIN],
-            )
-        except AlloWT7Error as err:
-            raise UpdateFailed(f"check_pin failed: {err}") from err
-        if not ok:
-            raise UpdateFailed("unlock PIN is incorrect")

@@ -1,11 +1,19 @@
 # Intelbras Allo wT7 — Home Assistant integration
 
+> **Fork notice.** This repository is a copy of
+> [fdaneluzzi/homeassistant-allo-wt7](https://github.com/fdaneluzzi/homeassistant-allo-wt7)
+> by **Fabio Daneluzzi**, distributed under the [MIT License](LICENSE), with
+> additional reliability and local-operation improvements (see
+> [Changes in this fork](#changes-in-this-fork)). All credit for the reverse
+> engineering of the Allo Plus protocol goes to the original author — please
+> consider [supporting them](#support-the-original-author).
+
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/hacs/integration)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Open the doors of your **Intelbras Allo wT7** video intercom from Home Assistant — over the local network, without keeping the official Allo Plus app running.
 
-> **Status: 0.3.0.** Door opening and doorbell ring detection are working and validated against a real device (model `IDS9478AW`).  Two-way audio and camera stream are out of scope for now.
+> **Status: 0.4.0.** Door opening and doorbell ring detection are working and validated against a real device (model `IDS9478AW`).  Two-way audio and camera stream are out of scope for now.
 
 ## Features
 
@@ -18,7 +26,7 @@ Open the doors of your **Intelbras Allo wT7** video intercom from Home Assistant
 
 ## Requirements
 
-- Home Assistant 2023.8 or newer (for the `event` entity platform used by doorbell detection)
+- Home Assistant 2024.6 or newer
 - Intelbras Allo wT7 (or wT7 Lite) on your LAN, paired and working with the Allo Plus app
 - Your Allo Plus account email and password
 - The numeric unlock PIN that you set in the app the first time you opened a door
@@ -37,13 +45,13 @@ variants ship firmware that speaks a **different LAN protocol dialect** and are
 If your model returns `-1`/`-10` errors, supporting it requires capturing the
 official Allo Plus app's LAN traffic (e.g. with mitmproxy) while opening a door,
 so the real command names/format can be mapped. Contributions welcome — please
-[open an issue](https://github.com/fdaneluzzi/homeassistant-allo-wt7/issues)
+[open an issue](https://github.com/halissonribeiro/homeassistant-allo-wt7/issues)
 with the capture (redact your PIN/OAC/credentials first).
 
 ## Install via HACS
 
 1. In HACS → Integrations → ⋮ → Custom repositories
-2. Add `https://github.com/fdaneluzzi/homeassistant-allo-wt7` as an Integration
+2. Add `https://github.com/halissonribeiro/homeassistant-allo-wt7` as an Integration
 3. Install **Intelbras Allo wT7**
 4. Restart Home Assistant
 5. Settings → Devices & Services → Add Integration → search "Allo wT7"
@@ -52,7 +60,7 @@ with the capture (redact your PIN/OAC/credentials first).
 
 ```bash
 cd /config/custom_components/
-git clone https://github.com/fdaneluzzi/homeassistant-allo-wt7.git tmp
+git clone https://github.com/halissonribeiro/homeassistant-allo-wt7.git tmp
 mv tmp/custom_components/allo_wt7 .
 rm -rf tmp
 ```
@@ -90,6 +98,10 @@ data:
 ```
 
 If you have multiple wT7 monitors configured, also pass `entry_id`.
+
+The `allo_wt7_doorbell_ring` bus event carries `entry_id`, `filename` and
+`starttime`. With several monitors, filter on `event_data.entry_id`; the
+`event` entity and the device trigger already do this for you.
 
 ## Doorbell ring detection
 
@@ -180,22 +192,50 @@ The cloud is contacted only to fetch the `out-auth-code` (OAC) — a per-device 
 
 - [x] 0.1.0 — Open doors (as `lock` entities — deprecated)
 - [x] 0.2.0 — Switch to `button` entities + service action
-- [x] 0.3.0 — Doorbell ring detection via `event` entity (current)
+- [x] 0.3.0 — Doorbell ring detection via `event` entity
+- [x] 0.4.0 — Pooled LAN connections, offline-tolerant OAC cache, per-device rings (this fork)
 - [ ] Camera snapshot
 - [ ] Two-way audio
 - [ ] Push to HACS default repositories
 
 ## Reporting issues
 
-Open an issue on [GitHub](https://github.com/fdaneluzzi/homeassistant-allo-wt7/issues) with:
+Open an issue on [GitHub](https://github.com/halissonribeiro/homeassistant-allo-wt7/issues) with:
 - Your wT7 model (visible in the device QR code, e.g. `IDS9478AW`, `IDS9478SW`, `IDS9478AW Lite`)
 - Home Assistant version
 - A copy of the entry's debug log (Settings → Logs, filter by `custom_components.allo_wt7`)
 - **Never include** your PIN, password, OAC, or full UMID — redact them first.
 
-## Support this project
+## Changes in this fork
 
-If this integration saved you time or money, consider supporting its development:
+0.4.0, on top of upstream 0.3.0:
+
+- **Works through cloud outages.** When the 12 h credential (OAC) expires and
+  the Allo Plus cloud or your internet is down, the last OAC keeps being used
+  on the LAN (the monitor still decides if it is valid) and the cloud is
+  retried every 10 minutes instead of on every 2 s doorbell poll.
+- **Fewer connections to the monitor.** Door-open and PIN checks reuse Home
+  Assistant's pooled HTTP session instead of opening a new session (and a new
+  TLS handshake) per request; a connection dropped while idle is retried at
+  once instead of waiting 10 s.
+- **Timeouts handled.** Units that silently drop port 80 used to surface a raw
+  timeout (setup failed with "Unknown error"); they now count as "cannot
+  connect" and fall back correctly.
+- **One cloud login at a time.** A door press and the doorbell loop that both
+  find the OAC expired share one cloud login.
+- **Multiple monitors.** Doorbell rings are tagged with `entry_id`, so each
+  `event` entity and device trigger only fires for its own monitor.
+- **Readable errors.** Rate limit, wrong PIN and connection failures show a
+  clear message in the UI instead of a traceback.
+- **Modern HA APIs.** `entry.runtime_data`, service registered once in
+  `async_setup`, shared base entity; minimum HA 2024.6 (as `hacs.json` already
+  declared).
+- **Tests and CI.** `pytest` suite (`pip install -r requirements_test.txt &&
+  pytest`) plus hassfest and HACS validation on GitHub Actions.
+
+## Support the original author
+
+If this integration saved you time or money, consider supporting the original author's work:
 
 - **GitHub Sponsors:** [github.com/sponsors/fdaneluzzi](https://github.com/sponsors/fdaneluzzi)
 - **PIX (Brasil):** `aae9a1b1-11e2-4282-a16d-7df8f48ae903`

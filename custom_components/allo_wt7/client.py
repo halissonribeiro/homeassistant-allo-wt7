@@ -4,6 +4,10 @@ Talks to the Allo Plus cloud to obtain a per-device session credential,
 then issues open-door commands directly to the monitor over the LAN.
 The session credential is cached on disk; after the first successful
 fetch, every unlock is pure LAN.
+
+All LAN traffic goes through the aiohttp session handed in by the caller
+(Home Assistant's shared session), so TCP/TLS connections to the monitor are
+pooled and kept alive instead of being re-established on every request.
 """
 
 from __future__ import annotations
@@ -15,6 +19,7 @@ import ssl
 import time
 import uuid
 import xml.etree.ElementTree as ET
+from xml.sax.saxutils import escape as xml_escape
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -91,9 +96,15 @@ class DeviceInfo:
     name: str
 
 
-def _ssl_no_verify() -> ssl.SSLContext:
-    """Return the shared no-verify TLS context (created once at import time)."""
-    return _SSL_CTX_NO_VERIFY
+_LAN_HEADERS = {
+    "Content-Type": "application/xml;charset=utf-8",
+    "User-Agent": USER_AGENT,
+}
+
+# Errors that mean "could not talk to the monitor right now" (as opposed to a
+# protocol-level rejection). Timeouts matter: units that filter port 80 drop
+# the SYN, so the request ends in a timeout rather than a refused connection.
+_LAN_TRANSPORT_ERRORS = (aiohttp.ClientError, asyncio.TimeoutError)
 
 
 def _encode_device_password(pwd: str) -> str:
@@ -140,7 +151,7 @@ def _build_lan_envelope(oac: str, command: str, content_inner: str = "") -> str:
         '<?xml version="1.0" encoding="UTF-8"?>'
         "<envelope>"
         "<header>"
-        f"<password>{oac}</password>"
+        f"<password>{xml_escape(oac)}</password>"
         f"<passwordencode>{LAN_PASSWORDENCODE}</passwordencode>"
         f"<security>{LAN_SECURITY}</security>"
         f"<username>{LAN_USERNAME}</username>"
@@ -175,14 +186,14 @@ class AlloWT7Client:
         self,
         session: aiohttp.ClientSession,
         *,
-        client_id: str,
+        client_id: str = "",
         request_timeout_s: float = 10.0,
         monitor_retry_delay_s: float = 10.0,
         max_unlocks_per_hour: int = 12,
         min_seconds_between_unlocks: int = 3,
     ) -> None:
-        self._session_hint = session  # not used directly; we create our own per OAC fetch
-        self._client_id = client_id
+        self._session = session  # shared HA session, used for all LAN calls
+        self.client_id = client_id
         self._request_timeout_s = request_timeout_s
         self._monitor_retry_delay_s = monitor_retry_delay_s
         self._max_unlocks_per_hour = max_unlocks_per_hour
@@ -246,7 +257,6 @@ class AlloWT7Client:
 
     async def poll_last_picture(
         self,
-        session: aiohttp.ClientSession,
         monitor_ip: str,
         oac: str,
         *,
@@ -285,12 +295,6 @@ class AlloWT7Client:
             (None, None, None, err_str) — protocol/network error; back off.
         """
         url = f"https://{monitor_ip}{LAN_CGI_PATH}"
-        ctx = _ssl_no_verify()
-        headers = {
-            "Content-Type": "application/xml;charset=utf-8",
-            "User-Agent": USER_AGENT,
-        }
-        timeout = aiohttp.ClientTimeout(total=self._request_timeout_s)
         total_bytes = 0
 
         sess_id = session_id
@@ -316,16 +320,9 @@ class AlloWT7Client:
             )
 
             try:
-                async with session.post(
-                    url,
-                    data=session_body.encode("utf-8"),
-                    headers=headers,
-                    ssl=ctx,
-                    timeout=timeout,
-                ) as resp:
-                    raw = await resp.read()
-            except Exception as exc:  # noqa: BLE001
-                return None, None, None, f"session request failed: {exc}"
+                _, raw = await self._lan_request(url, session_body)
+            except _LAN_TRANSPORT_ERRORS as exc:
+                return None, None, None, f"session request failed: {exc!r}"
             total_bytes += len(raw)
 
             env = _parse_envelope(raw)
@@ -363,15 +360,8 @@ class AlloWT7Client:
                 f"<record><id>{sess_id}</id></record>",
             )
             try:
-                async with session.post(
-                    url,
-                    data=msg_body.encode("utf-8"),
-                    headers=headers,
-                    ssl=ctx,
-                    timeout=timeout,
-                ) as resp:
-                    raw = await resp.read()
-            except Exception:  # noqa: BLE001
+                _, raw = await self._lan_request(url, msg_body)
+            except _LAN_TRANSPORT_ERRORS:
                 break  # use whatever we collected so far
             total_bytes += len(raw)
 
@@ -437,7 +427,7 @@ class AlloWT7Client:
     async def _cloud_login_and_get_oac(
         self, email: str, password: str
     ) -> tuple[str, DeviceInfo]:
-        ctx = _ssl_no_verify()
+        ctx = _SSL_CTX_NO_VERIFY
         base = f"https://{CLOUD_HOST}:{CLOUD_PORT}"
         p_sha = hashlib.sha256(password.encode("utf-8")).hexdigest()
         jar = aiohttp.CookieJar(unsafe=True)
@@ -447,13 +437,13 @@ class AlloWT7Client:
                 await self._post(session, f"{base}/auth/user;jus_duplex=down", b"", ctx)
 
                 login_content = (
-                    f"<content><account>{email}</account>"
+                    f"<content><account>{xml_escape(email)}</account>"
                     f"<password>{p_sha}</password>"
                     "<auth-type>0</auth-type><auth-code></auth-code>"
                     "<ip-region-id>0</ip-region-id></content>"
                 )
                 login_body = _build_cloud_envelope(
-                    "login", 1, login_content, self._client_id
+                    "login", 1, login_content, self.client_id
                 )
                 await self._post(
                     session, f"{base}/auth/user;jus_duplex=up", login_body, ctx
@@ -483,7 +473,7 @@ class AlloWT7Client:
                     2,
                     "<content><filter></filter><order>0</order>"
                     "<count>0</count><page>0</page><owner></owner></content>",
-                    self._client_id,
+                    self.client_id,
                     session_id,
                 )
                 await self._post(
@@ -519,10 +509,10 @@ class AlloWT7Client:
                     info.model,
                 )
                 return oac, info
-            except aiohttp.ClientConnectorError as e:
-                raise AlloWT7ConnectionError(f"cloud unreachable: {e}") from e
             except asyncio.TimeoutError as e:
                 raise AlloWT7ConnectionError("cloud timeout") from e
+            except aiohttp.ClientError as e:
+                raise AlloWT7ConnectionError(f"cloud unreachable: {e}") from e
 
     async def _send_opendoor(
         self,
@@ -557,9 +547,9 @@ class AlloWT7Client:
     async def _post_lan(self, monitor_ip: str, body: str, scheme: str) -> str:
         """POST body to /tdkcgi. Returns the <error> field as string.
 
-        Tries http first (default); falls back to https on connect refused.
-        The monitor's HTTP port is closed when idle and reopens on activity;
-        we retry once after a short delay.
+        Tries https first, then ``scheme`` if it is plain http. The monitor's
+        HTTP port is closed when idle and reopens on activity; if every scheme
+        fails at the transport level we wait and retry once.
         """
         # https-first: many wT7 units (e.g. IDS94B1W) are https-only and *filter*
         # port 80 (SYN dropped -> full-timeout hang) rather than refusing it, which
@@ -570,35 +560,19 @@ class AlloWT7Client:
         for attempt in range(2):
             for sch in schemes:
                 url = f"{sch}://{monitor_ip}{LAN_CGI_PATH}"
-                ctx = _ssl_no_verify() if sch == "https" else None
-                async with aiohttp.ClientSession() as session:
-                    t = aiohttp.ClientTimeout(total=self._request_timeout_s)
-                    try:
-                        async with session.post(
-                            url,
-                            data=body.encode("utf-8"),
-                            headers={
-                                "Content-Type": "application/xml;charset=utf-8",
-                                "User-Agent": USER_AGENT,
-                            },
-                            ssl=ctx,
-                            timeout=t,
-                        ) as resp:
-                            raw = await resp.read()
-                            if resp.status != 200:
-                                _LOGGER.warning(
-                                    "LAN %s HTTP %s", url, resp.status
-                                )
-                                continue
-                            try:
-                                root = ET.fromstring(raw)
-                            except ET.ParseError:
-                                _LOGGER.warning("LAN unparseable: %r", raw[:200])
-                                return "?"
-                            return root.findtext(".//error") or "?"
-                    except aiohttp.ClientConnectorError as e:
-                        last_exc = e
-                        continue
+                try:
+                    status, raw = await self._lan_request(url, body)
+                except _LAN_TRANSPORT_ERRORS as e:
+                    last_exc = e
+                    continue
+                if status != 200:
+                    _LOGGER.warning("LAN %s HTTP %s", url, status)
+                    continue
+                env = _parse_envelope(raw)
+                if env is None:
+                    _LOGGER.warning("LAN unparseable: %r", raw[:200])
+                    return "?"
+                return env.findtext(".//error") or "?"
             if attempt == 0:
                 _LOGGER.info(
                     "monitor possibly idle, waiting %.1fs and retrying",
@@ -607,8 +581,30 @@ class AlloWT7Client:
                 await asyncio.sleep(self._monitor_retry_delay_s)
 
         raise AlloWT7ConnectionError(
-            f"monitor unreachable at {monitor_ip}{LAN_CGI_PATH}: {last_exc}"
+            f"monitor unreachable at {monitor_ip}{LAN_CGI_PATH}: {last_exc!r}"
         )
+
+    async def _lan_request(self, url: str, body: str) -> tuple[int, bytes]:
+        """POST an XML body to the monitor over the shared, pooled session.
+
+        A pooled keep-alive connection may have been dropped by the monitor
+        while idle; that surfaces as ServerDisconnectedError on first use, so
+        retry once right away on a fresh connection instead of backing off.
+        """
+        for attempt in range(2):
+            try:
+                async with self._session.post(
+                    url,
+                    data=body.encode("utf-8"),
+                    headers=_LAN_HEADERS,
+                    ssl=_SSL_CTX_NO_VERIFY if url.startswith("https") else None,
+                    timeout=aiohttp.ClientTimeout(total=self._request_timeout_s),
+                ) as resp:
+                    return resp.status, await resp.read()
+            except aiohttp.ServerDisconnectedError:
+                if attempt == 1:
+                    raise
+        raise AssertionError("unreachable")
 
     async def _post(
         self,
@@ -622,10 +618,7 @@ class AlloWT7Client:
         async with session.post(
             url,
             data=body,
-            headers={
-                "Content-Type": "application/xml;charset=utf-8",
-                "User-Agent": USER_AGENT,
-            },
+            headers=_LAN_HEADERS,
             ssl=ctx,
             timeout=t,
         ) as resp:
