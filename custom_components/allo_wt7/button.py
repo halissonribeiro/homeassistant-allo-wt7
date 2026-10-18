@@ -12,7 +12,6 @@ import logging
 from homeassistant.components.button import ButtonEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import (
@@ -21,11 +20,9 @@ from .const import (
     CONF_DOOR2_NAME,
     DEFAULT_DOOR1_NAME,
     DEFAULT_DOOR2_NAME,
-    DOMAIN,
-    MANUFACTURER,
-    MODEL,
 )
 from .coordinator import AlloWT7Coordinator
+from .entity import AlloWT7Entity
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -35,7 +32,7 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    coordinator: AlloWT7Coordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator: AlloWT7Coordinator = entry.runtime_data
 
     door1_name = entry.data.get(CONF_DOOR1_NAME, DEFAULT_DOOR1_NAME)
     entities: list[AlloWT7DoorButton] = [
@@ -49,7 +46,7 @@ async def async_setup_entry(
     async_add_entities(entities)
 
 
-class AlloWT7DoorButton(ButtonEntity):
+class AlloWT7DoorButton(AlloWT7Entity, ButtonEntity):
     """A button that fires one open-door pulse on the wT7.
 
     No state — the wT7 does not report whether the relay/gate is currently
@@ -57,8 +54,6 @@ class AlloWT7DoorButton(ButtonEntity):
     the side door's lock is a momentary unlock (auto-closes by spring).
     Either way, the user perception is "I pressed a button."
     """
-
-    _attr_has_entity_name = True
 
     def __init__(
         self,
@@ -68,27 +63,15 @@ class AlloWT7DoorButton(ButtonEntity):
         lock_number: int,
         name: str,
     ) -> None:
-        self._coordinator = coordinator
-        self._entry = entry
+        super().__init__(coordinator, entry)
         self._lock_number = lock_number
         self._attr_name = name
-        self._attr_unique_id = f"{entry.unique_id or entry.entry_id}_button_{lock_number}"
+        self._attr_unique_id = f"{self._device_key}_button_{lock_number}"
         # Icon hint (purely cosmetic)
         if lock_number == 1:
             self._attr_icon = "mdi:door-open"
         else:
             self._attr_icon = "mdi:garage-open-variant"
-
-    @property
-    def device_info(self) -> DeviceInfo:
-        dev = self._coordinator.device_info
-        return DeviceInfo(
-            identifiers={(DOMAIN, self._entry.unique_id or self._entry.entry_id)},
-            manufacturer=MANUFACTURER,
-            model=MODEL,
-            name=(dev.name if dev else "Allo wT7"),
-            serial_number=(dev.umid if dev else None),
-        )
 
     async def async_press(self) -> None:
         """Fire one open-door pulse."""

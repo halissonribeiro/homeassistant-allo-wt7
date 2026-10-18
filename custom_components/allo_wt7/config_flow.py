@@ -7,9 +7,9 @@ from typing import Any
 
 import voluptuous as vol
 from homeassistant import config_entries
-from homeassistant.config_entries import ConfigEntry
+from homeassistant.config_entries import ConfigEntry, ConfigFlowResult
 from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
-from homeassistant.data_entry_flow import FlowResult
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .client import (
     AlloWT7AuthError,
@@ -66,7 +66,7 @@ class AlloWT7OptionsFlow(config_entries.OptionsFlow):
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    ) -> ConfigFlowResult:
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)
 
@@ -97,7 +97,7 @@ class AlloWT7ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    ) -> ConfigFlowResult:
         errors: dict[str, str] = {}
 
         if user_input is not None:
@@ -120,12 +120,10 @@ class AlloWT7ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
             if not errors:
                 try:
-                    from homeassistant.helpers.aiohttp_client import (
-                        async_get_clientsession,
+                    client = AlloWT7Client(
+                        async_get_clientsession(self.hass),
+                        client_id=generate_client_id(),
                     )
-
-                    session = async_get_clientsession(self.hass)
-                    client = AlloWT7Client(session, client_id=generate_client_id())
 
                     # Test cloud login + retrieve OAC
                     oac, info = await client.fetch_oac(
