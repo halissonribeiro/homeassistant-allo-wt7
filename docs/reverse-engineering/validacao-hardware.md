@@ -47,3 +47,31 @@ merece um teste com `ffprobe rtsp://<IP>:554/`.
 ## 5. IDS9478W (se houver acesso a um)
 
 Rodar o teste 1 nele e anexar a saída a uma issue.
+
+## Resultados
+
+### 2026-10-18 — IDS9478AW, firmware V401.R001.A310.00.G0077.B010 (2025-06-11)
+
+Teste 1 (sondagem somente leitura), via HTTPS, com dois OACs salvos pela
+integração no mesmo dia. Os dois foram aceitos.
+
+| Comando | Dialeto | Resultado |
+|---|---|---|
+| `get.system.info` | XML | `0`: versão, data, MAC, nº de canais. **Sem `<model>`** |
+| `get.product.info` | XML | `0`: versão, data, MAC e `<model>IDS9478AW</model>` |
+| `get.device.status` | XML | `0`: fuso/hora, `devability` e `<devicestatus>` com `calling`, `lockstatus`, `volume` etc. (todos `false` no momento) |
+| `get.system.status` | XML | `-10` (não suportado) |
+| `get.tfcard.info` | XML | `-10` (não suportado) |
+| `get.audio.outvolume` | JSON | `-10` (não suportado) |
+| `get.lock.status` | JSON | `-1` (comando desconhecido) |
+| `get.call.time` | JSON | `-10` (não suportado) |
+
+Conclusões:
+
+- **Confirmada:** `get.system.info` funciona neste firmware; o modelo vem de
+  `get.product.info` (a 0.5.1 passou a consultá-lo como reserva).
+- **Confirmada:** o dialeto JSON não é suportado neste firmware; entidades de
+  volume e tempo de abertura ficam fora.
+- **Hipótese:** `devicestatus/calling` pode indicar chamada em andamento.
+  Falta consultar `get.device.status` durante um toque para confirmar.
+- **Não investigada:** expiração do OAC (teste 2).

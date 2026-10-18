@@ -172,6 +172,29 @@ async def test_get_system_info_parses_fields() -> None:
     )
 
 
+async def test_get_system_info_model_from_product_info() -> None:
+    """IDS9478AW firmware omits <model> in get.system.info (seen on hardware)."""
+    client = _client()
+    system_xml = (
+        "<content><system><info><version>V401.R001.A310.00.G0077.B010</version>"
+        "<releasedate>2025-06-11t09:00:00z</releasedate></info></system></content>"
+    )
+    product_xml = "<content><info><model>IDS9478AW</model></info></content>"
+    mock = AsyncMock(
+        side_effect=[(200, _reply("0", system_xml)), (200, _reply("0", product_xml))]
+    )
+    with patch.object(client, "_lan_request", mock):
+        info = await client.get_system_info("10.0.0.2", "oac")
+    assert "<command>get.product.info</command>" in mock.call_args.args[1]
+    assert (info.model, info.version) == ("IDS9478AW", "V401.R001.A310.00.G0077.B010")
+
+    mock = AsyncMock(side_effect=[(200, _reply("0", system_xml)), (200, _reply("-10"))])
+    with patch.object(client, "_lan_request", mock):
+        info = await client.get_system_info("10.0.0.2", "oac")
+    assert info.model is None
+    assert info.version == "V401.R001.A310.00.G0077.B010"
+
+
 async def test_get_system_info_unsupported() -> None:
     client = _client()
     with patch.object(client, "_lan_request", AsyncMock(return_value=(200, _reply("-1")))):
