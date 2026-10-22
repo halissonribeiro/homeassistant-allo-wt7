@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import AsyncIterator
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -41,7 +42,9 @@ from .client import (
     SystemInfo,
     generate_client_id,
 )
+from .quii import QuIIAuthenticationError, QuIIStreamClient
 from .const import (
+    CONF_DEVICE_TLS_SHA256,
     CONF_DOORBELL_ENABLED,
     CONF_DOORBELL_POLL_INTERVAL,
     CONF_EMAIL,
@@ -144,6 +147,10 @@ class AlloWT7Coordinator:
         )
         self._oac: str | None = None
         self._oac_expires_at: float = 0.0
+        # Live-video QUII stream key: kept only in memory, never persisted,
+        # logged or exposed in diagnostics.
+        self._stream_key: str | None = None
+        self._stream_key_lock = asyncio.Lock()
         self.device_info: DeviceInfo | None = None
         # Serializes cloud fetches so the doorbell loop and a door press that
         # both find the OAC expired trigger one login, not two.
@@ -239,6 +246,62 @@ class AlloWT7Coordinator:
     @property
     def has_cached_oac(self) -> bool:
         return bool(self._oac)
+
+    @property
+    def video_tls_fingerprint_configured(self) -> bool:
+        """Whether live video has a certificate pin configured."""
+        return bool(self._opt(CONF_DEVICE_TLS_SHA256, ""))
+
+    async def async_video_frames(self) -> AsyncIterator[bytes]:
+        """Yield live H.264 frames after retrieving the key over pinned HTTPS."""
+        for attempt in range(2):
+            key, oac = await self._async_get_video_credentials(
+                force_refresh=bool(attempt)
+            )
+            stream = QuIIStreamClient(
+                self._data[CONF_MONITOR_IP],
+                key,
+                oac,
+                self._client.client_id,
+            )
+            try:
+                async for frame in stream.video_frames():
+                    yield frame
+                return
+            except QuIIAuthenticationError:
+                if attempt:
+                    raise
+                _LOGGER.warning("QUII rejected video credentials; refreshing once")
+
+    async def _async_get_video_credentials(
+        self, *, force_refresh: bool = False
+    ) -> tuple[str, str]:
+        """Return the in-memory stream key and a current OAC for QUII login."""
+        async with self._stream_key_lock:
+            if force_refresh:
+                self._stream_key = None
+            for attempt in range(2):
+                oac = await self._ensure_oac(
+                    force_refresh=force_refresh or bool(attempt)
+                )
+                if self._stream_key is not None:
+                    return self._stream_key, oac
+                try:
+                    key = await self._client.get_stream_key(
+                        self._data[CONF_MONITOR_IP],
+                        oac,
+                        self._opt(CONF_DEVICE_TLS_SHA256, ""),
+                    )
+                    self._stream_key = key
+                    return key, oac
+                except AlloWT7AuthError:
+                    if attempt == 0:
+                        _LOGGER.warning(
+                            "Monitor rejected the OAC for video; refreshing once"
+                        )
+                        continue
+                    raise
+        raise RuntimeError("video credential retry loop fell through")
 
     @property
     def doorbell_polling_running(self) -> bool:

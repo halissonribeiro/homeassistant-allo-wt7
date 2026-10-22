@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 DOMAIN = "allo_wt7"
-PLATFORMS = ["binary_sensor", "button", "event"]
+PLATFORMS = ["binary_sensor", "button", "camera", "event"]
 
 MANUFACTURER = "Intelbras"
 MODEL = "Allo wT7"
@@ -31,6 +31,7 @@ CONF_PASSWORD = "password"
 CONF_UNLOCK_PIN = "unlock_pin"
 CONF_REQUIRE_PIN = "require_pin"
 CONF_MONITOR_IP = "monitor_ip"
+CONF_DEVICE_TLS_SHA256 = "device_tls_sha256"
 CONF_OAC_CACHE_TTL = "oac_cache_ttl_s"
 CONF_NO_CLOUD_REFRESH = "no_cloud_refresh"
 CONF_MAX_UNLOCKS_PER_HOUR = "max_unlocks_per_hour"

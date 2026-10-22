@@ -34,22 +34,32 @@
   "options": {
     "step": {
       "init": {
-        "title": "Doorbell settings",
+        "title": "Doorbell and video settings",
         "data": {
           "doorbell_enabled": "Enable doorbell detection",
           "doorbell_poll_interval_s": "Poll interval in seconds (1–30)",
-          "no_cloud_refresh": "Local-only mode (don't refresh the OAC from the cloud)"
+          "no_cloud_refresh": "Local-only mode (don't refresh the OAC from the cloud)",
+          "device_tls_sha256": "Monitor TLS certificate SHA-256 fingerprint"
         },
         "data_description": {
-          "no_cloud_refresh": "When on, the cloud is used only for the first login and if the monitor rejects the stored code. Requires the device's authorization code to be fixed."
+          "no_cloud_refresh": "When on, the cloud is used only for the first login and if the monitor rejects the stored code. Requires the device's authorization code to be fixed.",
+          "device_tls_sha256": "Required to fetch the video key securely. Get it with OpenSSL from the monitor's certificate on port 443 (the exact command is in the README) and enter the 64 hexadecimal characters shown after 'SHA256 Fingerprint'. The certificate is checked before the OAC is sent."
         }
       }
+    },
+    "error": {
+      "invalid_tls_fingerprint": "Enter a SHA-256 fingerprint with 64 hexadecimal characters."
     }
   },
   "entity": {
     "binary_sensor": {
       "lan_connectivity": {
         "name": "LAN connection"
+      }
+    },
+    "camera": {
+      "live_video": {
+        "name": "Live video"
       }
     }
   }

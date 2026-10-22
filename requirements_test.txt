@@ -1,1 +1,6 @@
 pytest-homeassistant-custom-component
+# The camera platform pulls in Home Assistant's camera + ffmpeg components,
+# whose requirements are not installed by pytest-homeassistant-custom-component.
+# Pinned to the versions shipped by Home Assistant core.
+PyTurboJPEG==1.8.0
+ha-ffmpeg==3.2.2

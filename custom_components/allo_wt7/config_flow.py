@@ -18,8 +18,10 @@ from .client import (
     AlloWT7Error,
     AlloWT7WrongPinError,
     generate_client_id,
+    normalize_tls_fingerprint,
 )
 from .const import (
+    CONF_DEVICE_TLS_SHA256,
     CONF_DOOR1_NAME,
     CONF_DOOR2_ENABLED,
     CONF_DOOR2_NAME,
@@ -62,6 +64,7 @@ OPTIONS_SCHEMA = vol.Schema(
         vol.Optional(
             CONF_NO_CLOUD_REFRESH, default=DEFAULT_NO_CLOUD_REFRESH
         ): bool,
+        vol.Optional(CONF_DEVICE_TLS_SHA256, default=""): str,
     }
 )
 
@@ -73,6 +76,18 @@ class AlloWT7OptionsFlow(config_entries.OptionsFlow):
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         if user_input is not None:
+            try:
+                user_input[CONF_DEVICE_TLS_SHA256] = normalize_tls_fingerprint(
+                    user_input.get(CONF_DEVICE_TLS_SHA256, "").strip()
+                )
+            except ValueError:
+                return self.async_show_form(
+                    step_id="init",
+                    data_schema=self.add_suggested_values_to_schema(
+                        OPTIONS_SCHEMA, user_input
+                    ),
+                    errors={"base": "invalid_tls_fingerprint"},
+                )
             return self.async_create_entry(title="", data=user_input)
 
         current = {
@@ -84,6 +99,10 @@ class AlloWT7OptionsFlow(config_entries.OptionsFlow):
             ),
             CONF_NO_CLOUD_REFRESH: self.config_entry.options.get(
                 CONF_NO_CLOUD_REFRESH, DEFAULT_NO_CLOUD_REFRESH
+            ),
+            CONF_DEVICE_TLS_SHA256: self.config_entry.options.get(
+                CONF_DEVICE_TLS_SHA256,
+                self.config_entry.data.get(CONF_DEVICE_TLS_SHA256, ""),
             ),
         }
         return self.async_show_form(
