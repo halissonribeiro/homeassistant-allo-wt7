@@ -9,13 +9,17 @@ import aiohttp
 import pytest
 
 from custom_components.allo_wt7.client import (
+    AlloWT7AuthError,
     AlloWT7Client,
     AlloWT7ConnectionError,
+    AlloWT7Error,
+    AlloWT7TLSFingerprintError,
     AlloWT7UnsupportedError,
     AlloWT7WrongPinError,
     _build_lan_envelope,
     _encode_device_password,
     _parse_envelope,
+    normalize_tls_fingerprint,
 )
 
 
@@ -219,3 +223,88 @@ async def test_lan_result_callback() -> None:
             await client.check_pin("10.0.0.2", "oac", "1234")
     # One verdict per operation, after all schemes and the retry failed.
     assert results == [False]
+
+
+# --- QUII stream-key fetch (pinned HTTPS) ------------------------------------
+
+_FP = "AB" * 32  # a valid 64-hex SHA-256 fingerprint
+
+
+def test_normalize_tls_fingerprint() -> None:
+    assert normalize_tls_fingerprint("") == ""
+    colon = ":".join(["ab"] * 32)
+    assert normalize_tls_fingerprint(colon) == "AB" * 32
+    assert normalize_tls_fingerprint("  " + ("Ab" * 32) + "\n") == "AB" * 32
+    with pytest.raises(ValueError):
+        normalize_tls_fingerprint("abcd")
+    with pytest.raises(ValueError):
+        normalize_tls_fingerprint("zz" * 32)
+
+
+class _StreamKeyResp:
+    def __init__(self, status: int, body: bytes) -> None:
+        self.status = status
+        self._body = body
+
+    async def read(self) -> bytes:
+        return self._body
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+def _key_reply(key: str) -> bytes:
+    return _reply("0", f"<content><key>{key}</key></content>")
+
+
+async def test_get_stream_key_requires_fingerprint() -> None:
+    client = _client()
+    with pytest.raises(AlloWT7TLSFingerprintError):
+        await client.get_stream_key("10.0.0.2", "o" * 64, "")
+
+
+async def test_get_stream_key_success_pins_certificate() -> None:
+    client = _client()
+    captured: dict = {}
+
+    def _post(url, **kwargs):
+        captured["url"] = url
+        captured["ssl"] = kwargs.get("ssl")
+        captured["body"] = kwargs.get("data")
+        return _StreamKeyResp(200, _key_reply("K" * 32))
+
+    client._session.post = _post
+    key = await client.get_stream_key("10.0.0.2", "o" * 64, _FP)
+    assert key == "K" * 32
+    assert captured["url"] == "https://10.0.0.2/tdkcgi"
+    # The certificate is pinned, not CA-validated.
+    assert isinstance(captured["ssl"], aiohttp.Fingerprint)
+    assert b"get.device.streamkey" in captured["body"]
+
+
+async def test_get_stream_key_fingerprint_mismatch() -> None:
+    client = _client()
+
+    def _post(url, **kwargs):
+        raise aiohttp.ServerFingerprintMismatch(b"", b"", "10.0.0.2", 443)
+
+    client._session.post = _post
+    with pytest.raises(AlloWT7TLSFingerprintError):
+        await client.get_stream_key("10.0.0.2", "o" * 64, _FP)
+
+
+async def test_get_stream_key_401_is_auth_error() -> None:
+    client = _client()
+    client._session.post = lambda url, **kw: _StreamKeyResp(401, b"")
+    with pytest.raises(AlloWT7AuthError):
+        await client.get_stream_key("10.0.0.2", "o" * 64, _FP)
+
+
+async def test_get_stream_key_rejects_bad_key_length() -> None:
+    client = _client()
+    client._session.post = lambda url, **kw: _StreamKeyResp(200, _key_reply("tooshort"))
+    with pytest.raises(AlloWT7Error):
+        await client.get_stream_key("10.0.0.2", "o" * 64, _FP)

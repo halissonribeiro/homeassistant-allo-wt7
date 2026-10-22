@@ -13,11 +13,12 @@
 
 Open the doors of your **Intelbras Allo wT7** video intercom from Home Assistant — over the local network, without keeping the official Allo Plus app running.
 
-> **Status: 0.5.0.** Door opening and doorbell ring detection are working and validated against a real device (model `IDS9478AW`).  Two-way audio and camera stream are out of scope for now.
+> **Status: 0.7.0.** Door opening and doorbell ring detection are working and validated against a real device (model `IDS9478AW`). Live video is an **experimental** camera entity whose first end-to-end run still needs validation on the monitor. Two-way audio is out of scope for now.
 
 ## Features
 
 - 🔔 **Doorbell ring detection** as a Home Assistant `event` entity — trigger any automation the moment someone rings the bell (typ. 2–3 s latency, pure LAN polling)
+- 📹 **Experimental live video** as a Home Assistant `camera` entity — QUII over the LAN on TCP/34567, H.264 decoded to MJPEG by Home Assistant's FFmpeg component (needs a one-time TLS fingerprint; see [Live video](#live-video-experimental))
 - 🔘 **Open door(s)** as Home Assistant `button` entities (one press → one open pulse)
 - 🚪 **Dual-door support**: a wT7 typically controls a social door + a garage gate
 - 🛠️ **Service action** `allo_wt7.open_door` for automations that need to pass `lock_number` dynamically
@@ -32,6 +33,7 @@ Open the doors of your **Intelbras Allo wT7** video intercom from Home Assistant
 - Intelbras Allo wT7 (or wT7 Lite) on your LAN, paired and working with the Allo Plus app
 - Your Allo Plus account email and password
 - The numeric unlock PIN that you set in the app the first time you opened a door
+- FFmpeg on the Home Assistant host (bundled with Home Assistant OS and Container) — only needed for the experimental live video
 
 ## Unsupported models
 
@@ -156,6 +158,35 @@ talks to the cloud for the very first login, or if the monitor ever rejects
 the code (answering `401`), in which case it fetches a fresh one automatically.
 Leave it off if you are unsure; the default behaviour refreshes every 12 h.
 
+### Live video (experimental)
+
+The wT7 streams video with the proprietary **QUII** protocol (not RTSP/ONVIF),
+so Home Assistant needs the per-device QUII stream key, which the monitor only
+hands out over HTTPS. The monitor's certificate is self-signed, so the
+integration pins it by **SHA-256 fingerprint** instead of normal CA validation
+and checks that fingerprint *before* sending the OAC.
+
+1. In **Settings → Devices & Services → Allo wT7 → Configure**, paste the
+   monitor's TLS certificate SHA-256 fingerprint.
+2. On a Mac (or any machine with OpenSSL), get it with — replacing `<IP>` with
+   the monitor's current address:
+
+   ```
+   openssl s_client -connect <IP>:443 -showcerts </dev/null 2>/dev/null | openssl x509 -noout -sha256 -fingerprint
+   ```
+
+3. Copy the 64 hexadecimal characters after `SHA256 Fingerprint=` into the
+   option (colons and spaces are accepted). Saving reloads the integration and
+   enables the **Live video** camera entity; use it in a Picture Entity or
+   Camera card.
+
+The stream key is fetched on demand and held **only in memory** — never written
+to `.storage`, logs, or diagnostics. Frames are converted from H.264 to MJPEG
+for the Home Assistant camera proxy. This path is experimental and has not yet
+been validated end to end on hardware; audio, snapshots and HLS recording are
+unsupported, and other firmware variants have not been tested. If the monitor's
+certificate changes after a firmware reset, update the fingerprint option.
+
 ## Why `button` and not `lock`?
 
 The wT7 has no state sensor — it cannot tell HA whether a door is currently open or closed. Earlier versions exposed each door as a `lock` entity with fake "unlocked → re-locked after 5s" state, which was misleading (especially for the garage gate). A `button` is honest with the hardware: one press = one pulse. If you need state, build a template `binary_sensor` on top of an external sensor you trust.
@@ -209,6 +240,8 @@ The cloud is contacted only to fetch the `out-auth-code` (OAC) — a per-device 
 - [x] 0.3.0 — Doorbell ring detection via `event` entity
 - [x] 0.4.0 — Pooled LAN connections, offline-tolerant OAC cache, per-device rings (this fork)
 - [x] 0.5.0 — LAN connectivity sensor, firmware info, diagnostics, reverse-engineering notes (this fork)
+- [x] 0.6.0 — Local-only mode (reuse a fixed OAC without cloud refresh) (this fork)
+- [x] 0.7.0 — Experimental QUII live-video camera entity, hardware validation pending (this fork)
 - [ ] Camera snapshot
 - [ ] Two-way audio
 - [ ] Push to HACS default repositories
@@ -261,6 +294,22 @@ Open an issue on [GitHub](https://github.com/halissonribeiro/homeassistant-allo-
 - Diagnostics download with secrets redacted.
 - `tools/probe_readonly.py`: read-only LAN probe to check which app commands
   your monitor answers (never sends `set.*`).
+
+### 0.6.0
+
+- **Local-only mode** option: once the device's OAC is known to be fixed, the
+  integration reuses the stored code indefinitely and contacts the cloud only
+  for the first login or after a `401`. See
+  [Local-only mode](#local-only-mode-no-cloud-after-setup).
+
+### 0.7.0
+
+- **Experimental live video** as a `camera` entity. The stream key is fetched
+  on demand over HTTPS with the monitor's self-signed certificate pinned by
+  SHA-256 fingerprint and held only in memory; QUII/H.264 on TCP/34567 is
+  decoded to MJPEG by Home Assistant's FFmpeg component. Read-only: no door
+  commands are touched. Not yet validated end to end on hardware. See
+  [Live video](#live-video-experimental).
 
 ## Support the original author
 

@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import re
 import ssl
 import time
 import uuid
@@ -88,6 +89,10 @@ class AlloWT7UnsupportedError(AlloWT7Error):
 
 class AlloWT7RateLimitError(AlloWT7Error):
     """Local rate limiter rejected the request."""
+
+
+class AlloWT7TLSFingerprintError(AlloWT7Error):
+    """The monitor's TLS certificate does not match the configured pin."""
 
 
 @dataclass
@@ -311,6 +316,71 @@ class AlloWT7Client:
             mac=_field("mac"),
             release_date=_field("releasedate"),
         )
+
+    async def get_stream_key(
+        self, monitor_ip: str, oac: str, certificate_sha256: str
+    ) -> str:
+        """Fetch the read-only QUII key over HTTPS with a pinned certificate.
+
+        The key remains in memory and is never included in errors or logs.
+        The monitor uses a self-signed certificate, so normal CA validation is
+        replaced with an explicit SHA-256 certificate fingerprint check.
+        """
+        fingerprint = normalize_tls_fingerprint(certificate_sha256)
+        if not fingerprint:
+            raise AlloWT7TLSFingerprintError(
+                "Set the monitor's TLS SHA-256 fingerprint in integration options"
+            )
+
+        body = _build_lan_envelope(
+            _encode_device_password(oac), "get.device.streamkey"
+        )
+        url = f"https://{monitor_ip}{LAN_CGI_PATH}"
+        try:
+            async with self._session.post(
+                url,
+                data=body.encode("utf-8"),
+                headers=_LAN_HEADERS,
+                ssl=aiohttp.Fingerprint(bytes.fromhex(fingerprint)),
+                timeout=aiohttp.ClientTimeout(total=self._request_timeout_s),
+            ) as response:
+                raw = await response.read()
+                status = response.status
+        except aiohttp.ServerFingerprintMismatch as err:
+            self._report_lan(False)
+            raise AlloWT7TLSFingerprintError(
+                "Monitor TLS certificate does not match the configured fingerprint"
+            ) from err
+        except _LAN_TRANSPORT_ERRORS as err:
+            self._report_lan(False)
+            raise AlloWT7ConnectionError(
+                f"could not fetch QUII stream key from monitor at {monitor_ip}"
+            ) from err
+
+        self._report_lan(True)
+        if status == 401:
+            raise AlloWT7AuthError("Monitor rejected the OAC while fetching stream key")
+        if status != 200:
+            raise AlloWT7ConnectionError(
+                f"monitor returned HTTP {status} while fetching stream key"
+            )
+        env = _parse_envelope(raw)
+        if env is None:
+            raise AlloWT7Error("Monitor returned an invalid stream-key response")
+        error = env.findtext(".//error")
+        if error == LAN_ERROR_AUTH_INVALID:
+            raise AlloWT7AuthError("Monitor rejected the OAC while fetching stream key")
+        if error not in (None, LAN_ERROR_OK):
+            raise AlloWT7Error(f"get.device.streamkey returned error={error}")
+
+        key = (env.findtext(".//content/key") or "").strip()
+        try:
+            key_bytes = key.encode("ascii")
+        except UnicodeEncodeError as err:
+            raise AlloWT7Error("Monitor returned an invalid QUII stream key") from err
+        if len(key_bytes) != 32:
+            raise AlloWT7Error("Monitor returned an invalid QUII stream key")
+        return key
 
     async def _get_product_model(
         self, monitor_ip: str, oac: str, scheme: str
@@ -719,3 +789,11 @@ class AlloWT7Client:
 def generate_client_id() -> str:
     """Stable per-installation client ID."""
     return f"003-{APP_ID}-{uuid.uuid4().hex[:16]}"
+
+
+def normalize_tls_fingerprint(value: str) -> str:
+    """Return a normalized 64-hex SHA-256 TLS certificate fingerprint."""
+    normalized = re.sub(r"[:\s]", "", value).upper()
+    if normalized and re.fullmatch(r"[0-9A-F]{64}", normalized) is None:
+        raise ValueError("TLS fingerprint must contain 64 hexadecimal characters")
+    return normalized
