@@ -17,6 +17,7 @@ from custom_components.allo_wt7.client import (
 )
 from custom_components.allo_wt7.const import (
     CONF_DOORBELL_ENABLED,
+    CONF_NO_CLOUD_REFRESH,
     DOMAIN,
     EVENT_DOORBELL_RING,
 )
@@ -118,6 +119,51 @@ async def test_stale_oac_used_when_cloud_down(
     assert await coordinator._ensure_oac() == "o" * 64
     # The fallback backs off: the next call does not hit the cloud again.
     assert await coordinator._ensure_oac() == "o" * 64
+    assert mock_fetch_oac.call_count == 1
+
+
+async def test_no_cloud_refresh_keeps_cached_oac(
+    hass: HomeAssistant, mock_fetch_oac
+) -> None:
+    """With local-only mode on, an expired cache never re-hits the cloud."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data=DATA,
+        unique_id="umid1",
+        options={CONF_DOORBELL_ENABLED: False, CONF_NO_CLOUD_REFRESH: True},
+    )
+    entry.add_to_hass(hass)
+    await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    coordinator = entry.runtime_data
+    await coordinator._ensure_oac()  # first fetch caches the OAC
+    coordinator._oac_expires_at = 0  # TTL expired: normally would refresh
+
+    mock_fetch_oac.reset_mock()
+    assert await coordinator._ensure_oac() == "o" * 64
+    assert await coordinator._ensure_oac() == "o" * 64
+    assert mock_fetch_oac.call_count == 0
+
+
+async def test_no_cloud_refresh_still_refreshes_on_reject(
+    hass: HomeAssistant, mock_fetch_oac
+) -> None:
+    """A forced refresh (monitor rejected the OAC) still uses the cloud."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data=DATA,
+        unique_id="umid1",
+        options={CONF_DOORBELL_ENABLED: False, CONF_NO_CLOUD_REFRESH: True},
+    )
+    entry.add_to_hass(hass)
+    await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    coordinator = entry.runtime_data
+    await coordinator._ensure_oac()
+
+    mock_fetch_oac.reset_mock()
+    mock_fetch_oac.return_value = ("n" * 64, DeviceInfo("umid1", "IDS9478AW", "Casa"))
+    assert await coordinator._ensure_oac(force_refresh=True) == "n" * 64
     assert mock_fetch_oac.call_count == 1
 
 

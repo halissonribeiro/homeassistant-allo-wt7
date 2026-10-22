@@ -49,6 +49,7 @@ from .const import (
     CONF_MIN_SECONDS_BETWEEN_UNLOCKS,
     CONF_MONITOR_IP,
     CONF_MONITOR_RETRY_DELAY,
+    CONF_NO_CLOUD_REFRESH,
     CONF_OAC_CACHE_TTL,
     CONF_PASSWORD,
     CONF_REQUEST_TIMEOUT,
@@ -59,6 +60,7 @@ from .const import (
     DEFAULT_MAX_UNLOCKS_PER_HOUR,
     DEFAULT_MIN_SECONDS_BETWEEN_UNLOCKS,
     DEFAULT_MONITOR_RETRY_DELAY,
+    DEFAULT_NO_CLOUD_REFRESH,
     DEFAULT_OAC_CACHE_TTL,
     DEFAULT_REQUEST_TIMEOUT,
     DOMAIN,
@@ -324,8 +326,20 @@ class AlloWT7Coordinator:
         cloud cannot be reached, fall back to the cached OAC: the monitor is
         the real authority and answers 401 if it no longer accepts it, which
         is what triggers a forced refresh.
+
+        In no-cloud-refresh mode the cached OAC is treated as permanent: the
+        cloud is used only for the very first login and whenever the monitor
+        rejects the OAC (force_refresh after a 401), so a working install
+        never touches the cloud again.
         """
-        if not force_refresh and self._oac and time.time() < self._oac_expires_at:
+        if (
+            not force_refresh
+            and self._oac
+            and (
+                self._opt(CONF_NO_CLOUD_REFRESH, DEFAULT_NO_CLOUD_REFRESH)
+                or time.time() < self._oac_expires_at
+            )
+        ):
             return self._oac
         stale_oac = self._oac
         async with self._oac_lock:

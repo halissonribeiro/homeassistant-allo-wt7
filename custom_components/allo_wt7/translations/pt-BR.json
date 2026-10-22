@@ -37,7 +37,11 @@
         "title": "Configurações da campainha",
         "data": {
           "doorbell_enabled": "Ativar detecção de campainha",
-          "doorbell_poll_interval_s": "Intervalo de consulta em segundos (1–30)"
+          "doorbell_poll_interval_s": "Intervalo de consulta em segundos (1–30)",
+          "no_cloud_refresh": "Modo local (não renovar o OAC pela nuvem)"
+        },
+        "data_description": {
+          "no_cloud_refresh": "Quando ligado, a nuvem é usada só no primeiro login e se o monitor recusar o código guardado. Requer que o código de autorização do aparelho seja fixo."
         }
       }
     }
