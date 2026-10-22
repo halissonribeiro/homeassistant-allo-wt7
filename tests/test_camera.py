@@ -42,6 +42,18 @@ def test_available_follows_fingerprint_configuration() -> None:
     assert _camera(False).available is False
 
 
+def test_is_streaming_tracks_live_viewers_only() -> None:
+    cam = _camera()
+    # Fresh, and after a snapshot-style subscribe/unsubscribe, it is idle.
+    assert cam.is_streaming is False
+    cam._subscribers.add(object())  # a snapshot reader shares the decoder
+    assert cam.is_streaming is False  # but does not count as streaming
+    cam._live_viewers = 1
+    assert cam.is_streaming is True
+    cam._live_viewers = 0
+    assert cam.is_streaming is False
+
+
 async def test_subscribe_without_fingerprint_raises() -> None:
     cam = _camera(fingerprint_configured=False)
     with pytest.raises(HomeAssistantError):

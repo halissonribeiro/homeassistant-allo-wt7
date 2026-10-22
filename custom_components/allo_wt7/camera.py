@@ -61,6 +61,10 @@ class AlloWT7LiveCamera(AlloWT7Entity, Camera):
         self._worker_task: asyncio.Task[None] | None = None
         self._last_frame: bytes | None = None
         self._last_frame_at = 0.0
+        # Count only live MJPEG viewers, not one-off snapshot reads, so the
+        # entity's "streaming" state is accurate and flips back to idle when
+        # the last live viewer closes.
+        self._live_viewers = 0
 
     @property
     def available(self) -> bool:
@@ -69,8 +73,8 @@ class AlloWT7LiveCamera(AlloWT7Entity, Camera):
 
     @property
     def is_streaming(self) -> bool:
-        """Report the camera as streaming while a viewer is subscribed."""
-        return bool(self._subscribers)
+        """Report the camera as streaming while a live viewer is connected."""
+        return self._live_viewers > 0
 
     async def async_camera_image(
         self, width: int | None = None, height: int | None = None
@@ -89,6 +93,8 @@ class AlloWT7LiveCamera(AlloWT7Entity, Camera):
     ) -> web.StreamResponse:
         """Serve the live feed through Home Assistant's camera proxy endpoint."""
         queue = await self._subscribe()
+        self._live_viewers += 1
+        self.async_write_ha_state()
         try:
             first_frame = await self._next_frame(queue)
             response = web.StreamResponse(
@@ -107,6 +113,8 @@ class AlloWT7LiveCamera(AlloWT7Entity, Camera):
                     break
                 await response.write(_mjpeg_part(item))
         finally:
+            self._live_viewers -= 1
+            self.async_write_ha_state()
             await self._unsubscribe(queue)
         return response
 
