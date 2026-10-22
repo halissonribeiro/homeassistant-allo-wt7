@@ -73,6 +73,9 @@ async def test_setup_creates_entities(hass: HomeAssistant, mock_fetch_oac) -> No
     assert len(hass.states.async_entity_ids("button")) == 2
     assert len(hass.states.async_entity_ids("event")) == 1
     assert len(hass.states.async_entity_ids("binary_sensor")) == 1
+    # The camera entity must finish being added (regression: Camera.__init__
+    # was skipped, so HA's add flow raised on self._webrtc_provider).
+    assert len(hass.states.async_entity_ids("camera")) == 1
 
     assert await hass.config_entries.async_unload(entry.entry_id)
     assert entry.state is ConfigEntryState.NOT_LOADED

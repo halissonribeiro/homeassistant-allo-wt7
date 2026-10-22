@@ -50,6 +50,10 @@ class AlloWT7LiveCamera(AlloWT7Entity, Camera):
         ffmpeg_binary: str,
     ) -> None:
         super().__init__(coordinator, entry)
+        # AlloWT7Entity.__init__ does not chain to Camera.__init__, so run it
+        # explicitly; Camera sets up internal state (webrtc/stream providers)
+        # that Home Assistant touches when the entity is added.
+        Camera.__init__(self)
         self._ffmpeg_binary = ffmpeg_binary
         self._attr_unique_id = f"{self._device_key}_live_video"
         self._subscribers: set[asyncio.Queue[bytes | Exception]] = set()
