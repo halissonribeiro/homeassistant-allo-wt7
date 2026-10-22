@@ -43,7 +43,7 @@
         },
         "data_description": {
           "no_cloud_refresh": "Quando ligado, a nuvem é usada só no primeiro login e se o monitor recusar o código guardado. Requer que o código de autorização do aparelho seja fixo.",
-          "device_tls_sha256": "Necessária para buscar a chave de vídeo com segurança. No Mac, execute: openssl s_client -connect <IP do monitor>:443 -showcerts </dev/null 2>/dev/null | openssl x509 -noout -sha256 -fingerprint. Informe os 64 caracteres hexadecimais após SHA256 Fingerprint. O certificado é validado antes do envio do OAC."
+          "device_tls_sha256": "Necessária para buscar a chave de vídeo com segurança. Obtenha-a com OpenSSL a partir do certificado do monitor na porta 443 (o comando exato está no README) e informe os 64 caracteres hexadecimais mostrados após 'SHA256 Fingerprint'. O certificado é validado antes do envio do OAC."
         }
       }
     },
