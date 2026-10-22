@@ -141,8 +141,20 @@ To avoid spamming the device right after a ring (when the Allo Plus app also con
 In Settings → Devices & Services → Allo wT7 → **Configure**, you can:
 - Enable / disable doorbell detection entirely
 - Adjust the poll interval (1–30 s)
+- **Local-only mode** — stop refreshing the OAC from the cloud
 
 Changes take effect after HA reloads the entry (done automatically when you save).
+
+### Local-only mode (no cloud after setup)
+
+The `out-auth-code` (OAC) that authenticates LAN requests is a per-device
+code the cloud hands out at login. On the models tested it does not appear to
+expire on a timer — it only changes if you change the verification code in the
+Allo Plus app. If that holds for your device, you can tick **Local-only mode**
+in Configure. The integration then uses the stored OAC indefinitely and only
+talks to the cloud for the very first login, or if the monitor ever rejects
+the code (answering `401`), in which case it fetches a fresh one automatically.
+Leave it off if you are unsure; the default behaviour refreshes every 12 h.
 
 ## Why `button` and not `lock`?
 

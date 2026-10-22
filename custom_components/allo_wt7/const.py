@@ -32,6 +32,7 @@ CONF_UNLOCK_PIN = "unlock_pin"
 CONF_REQUIRE_PIN = "require_pin"
 CONF_MONITOR_IP = "monitor_ip"
 CONF_OAC_CACHE_TTL = "oac_cache_ttl_s"
+CONF_NO_CLOUD_REFRESH = "no_cloud_refresh"
 CONF_MAX_UNLOCKS_PER_HOUR = "max_unlocks_per_hour"
 CONF_MIN_SECONDS_BETWEEN_UNLOCKS = "min_seconds_between_unlocks"
 CONF_REQUEST_TIMEOUT = "request_timeout_s"
@@ -42,6 +43,7 @@ CONF_DOOR2_NAME = "door2_name"
 
 # --- Defaults
 DEFAULT_OAC_CACHE_TTL = 12 * 3600  # 12h
+DEFAULT_NO_CLOUD_REFRESH = False
 DEFAULT_MAX_UNLOCKS_PER_HOUR = 12
 DEFAULT_MIN_SECONDS_BETWEEN_UNLOCKS = 3
 DEFAULT_REQUEST_TIMEOUT = 10.0

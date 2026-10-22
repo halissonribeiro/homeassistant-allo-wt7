@@ -37,7 +37,11 @@
         "title": "Doorbell settings",
         "data": {
           "doorbell_enabled": "Enable doorbell detection",
-          "doorbell_poll_interval_s": "Poll interval in seconds (1–30)"
+          "doorbell_poll_interval_s": "Poll interval in seconds (1–30)",
+          "no_cloud_refresh": "Local-only mode (don't refresh the OAC from the cloud)"
+        },
+        "data_description": {
+          "no_cloud_refresh": "When on, the cloud is used only for the first login and if the monitor rejects the stored code. Requires the device's authorization code to be fixed."
         }
       }
     }

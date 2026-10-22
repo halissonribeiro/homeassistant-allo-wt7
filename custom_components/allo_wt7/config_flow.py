@@ -26,12 +26,14 @@ from .const import (
     CONF_DOORBELL_ENABLED,
     CONF_DOORBELL_POLL_INTERVAL,
     CONF_MONITOR_IP,
+    CONF_NO_CLOUD_REFRESH,
     CONF_REQUIRE_PIN,
     CONF_UNLOCK_PIN,
     DEFAULT_DOOR1_NAME,
     DEFAULT_DOOR2_NAME,
     DEFAULT_DOORBELL_ENABLED,
     DEFAULT_DOORBELL_POLL_INTERVAL,
+    DEFAULT_NO_CLOUD_REFRESH,
     DOMAIN,
 )
 
@@ -57,6 +59,9 @@ OPTIONS_SCHEMA = vol.Schema(
         vol.Optional(
             CONF_DOORBELL_POLL_INTERVAL, default=DEFAULT_DOORBELL_POLL_INTERVAL
         ): vol.All(vol.Coerce(float), vol.Range(min=1.0, max=30.0)),
+        vol.Optional(
+            CONF_NO_CLOUD_REFRESH, default=DEFAULT_NO_CLOUD_REFRESH
+        ): bool,
     }
 )
 
@@ -76,6 +81,9 @@ class AlloWT7OptionsFlow(config_entries.OptionsFlow):
             ),
             CONF_DOORBELL_POLL_INTERVAL: self.config_entry.options.get(
                 CONF_DOORBELL_POLL_INTERVAL, DEFAULT_DOORBELL_POLL_INTERVAL
+            ),
+            CONF_NO_CLOUD_REFRESH: self.config_entry.options.get(
+                CONF_NO_CLOUD_REFRESH, DEFAULT_NO_CLOUD_REFRESH
             ),
         }
         return self.async_show_form(
